@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.netlify/
+.vite-dev.*.log
+.playwright-mcp/
+*.png
+*.log
