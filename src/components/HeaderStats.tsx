@@ -12,7 +12,7 @@ export const HeaderStats = ({ stocks }: Props) => {
   return (
     <div className="grid gap-3 md:grid-cols-4">
       <Stat icon={<ShieldCheck className="h-5 w-5" />} label="Pro Trader passes" value={String(proPasses)} />
-      <Stat icon={<Target className="h-5 w-5" />} label="5% target models" value="15" />
+      <Stat icon={<Target className="h-5 w-5" />} label="Strategy models" value="23" />
       <Stat icon={<Activity className="h-5 w-5" />} label="Confluence names" value={String(confluence)} />
       <Stat icon={<TrendingUp className="h-5 w-5" />} label="Top candidate" value={best ? best.series.profile.symbol : '-'} />
     </div>

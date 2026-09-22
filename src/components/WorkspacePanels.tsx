@@ -1,7 +1,8 @@
 import { AlertRule, AppSettings, TradePlan, WatchlistItem } from '../types';
 import { defaultSettings, strategyNames } from '../engine/strategyEngine';
 import { currency, plainPercent } from '../lib/format';
-import { Bell, CheckCircle2, PlugZap, Trash2 } from 'lucide-react';
+import { Bell, CheckCircle2, MessageCircle, PlugZap, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 
 type WatchProps = {
   items: WatchlistItem[];
@@ -70,34 +71,71 @@ type AlertProps = {
   onRemove: (id: string) => void;
 };
 
-export const AlertsPanel = ({ alerts, prices, onRemove }: AlertProps) => (
-  <section className="rounded-lg border border-line bg-white p-4 shadow-soft">
-    <div className="flex items-center gap-2">
-      <Bell className="h-4 w-4 text-signal" />
-      <h2 className="font-semibold text-ink">Alerts</h2>
-    </div>
-    <p className="mt-1 text-sm text-slate-500">V1 alerts are evaluated inside the app from the latest available price.</p>
-    <div className="mt-4 space-y-3">
-      {alerts.length === 0 && <Empty text="No alerts yet. Create alerts from a stock detail page." />}
-      {alerts.map((alert) => {
-        const price = prices[alert.symbol] ?? 0;
-        const hit = alert.kind === 'stop' ? price <= alert.level : price >= alert.level * 0.995;
-        return (
-          <div key={alert.id} className={`flex items-center justify-between gap-3 rounded-md border p-3 ${hit ? 'border-emerald-200 bg-emerald-50' : 'border-line'}`}>
-            <div>
-              <p className="font-semibold text-ink">{alert.symbol} {alert.kind}</p>
-              <p className="text-xs text-slate-600">Level {currency(alert.level)} / Latest {currency(price)}</p>
-              {hit && <p className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Trigger zone reached</p>}
+export const AlertsPanel = ({ alerts, prices, onRemove }: AlertProps) => {
+  const [sendStatus, setSendStatus] = useState<Record<string, string>>({});
+
+  const sendWhatsApp = async (alert: AlertRule) => {
+    if (!alert.message) return;
+    setSendStatus((current) => ({ ...current, [alert.id]: 'Sending...' }));
+    try {
+      const response = await fetch('/.netlify/functions/whatsapp-alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: alert.message })
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({ error: 'WhatsApp send failed.' }));
+        throw new Error(payload.error || 'WhatsApp send failed.');
+      }
+      setSendStatus((current) => ({ ...current, [alert.id]: 'Sent to WhatsApp' }));
+    } catch (error) {
+      setSendStatus((current) => ({ ...current, [alert.id]: error instanceof Error ? error.message : 'WhatsApp send failed.' }));
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-line bg-white p-4 shadow-soft">
+      <div className="flex items-center gap-2">
+        <Bell className="h-4 w-4 text-signal" />
+        <h2 className="font-semibold text-ink">Alerts</h2>
+      </div>
+      <p className="mt-1 text-sm text-slate-500">Alerts are evaluated inside the app from the latest available price. WhatsApp delivery requires server credentials.</p>
+      <div className="mt-4 space-y-3">
+        {alerts.length === 0 && <Empty text="No alerts yet. Create alerts from a stock detail page." />}
+        {alerts.map((alert) => {
+          const price = prices[alert.symbol] ?? 0;
+          const hit = alert.kind === 'stop' ? price <= alert.level : price >= alert.level * 0.995;
+          return (
+            <div key={alert.id} className={`flex items-center justify-between gap-3 rounded-md border p-3 ${hit ? 'border-emerald-200 bg-emerald-50' : 'border-line'}`}>
+              <div>
+                <p className="font-semibold text-ink">{alert.symbol} {alert.kind}</p>
+                <p className="text-xs text-slate-600">Level {currency(alert.level)} / Latest {currency(price)}</p>
+                {alert.channel === 'whatsapp-ready' && (
+                  <p className="mt-1 text-xs font-semibold text-blue-700">WhatsApp-ready entry message saved</p>
+                )}
+                {alert.message && (
+                  <p className="mt-1 max-w-2xl text-xs text-slate-500">{alert.message}</p>
+                )}
+                {sendStatus[alert.id] && <p className="mt-1 text-xs font-semibold text-slate-600">{sendStatus[alert.id]}</p>}
+                {hit && <p className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Trigger zone reached</p>}
+              </div>
+              <div className="flex items-center gap-1">
+                {alert.channel === 'whatsapp-ready' && alert.message && (
+                  <button onClick={() => sendWhatsApp(alert)} className="rounded-md p-2 text-blue-700 hover:bg-white" title="Send WhatsApp alert">
+                    <MessageCircle className="h-4 w-4" />
+                  </button>
+                )}
+                <button onClick={() => onRemove(alert.id)} className="rounded-md p-2 text-slate-500 hover:bg-white hover:text-loss">
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
             </div>
-            <button onClick={() => onRemove(alert.id)} className="rounded-md p-2 text-slate-500 hover:bg-white hover:text-loss">
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  </section>
-);
+          );
+        })}
+      </div>
+    </section>
+  );
+};
 
 type SettingsProps = {
   settings: AppSettings;

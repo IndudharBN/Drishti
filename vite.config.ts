@@ -24,6 +24,12 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
         rewrite: (path) => path.replace(/^\/nasdaq/, '')
+      },
+      '/wikipedia': {
+        target: 'https://en.wikipedia.org',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/wikipedia/, '')
       }
     }
   },

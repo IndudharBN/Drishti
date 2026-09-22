@@ -12,7 +12,15 @@ export type StrategyId =
   | 'moving-average-reclaim'
   | 'bottom-reversal'
   | 'support-hold-pullback'
+  | 'sideways-base-ready'
+  | 'two-percent-vwap-momentum'
   | 'two-day-five-percent'
+  | 'results-gap-down-recovery'
+  | 'today-five-percent-down'
+  | 'today-ten-percent-down'
+  | 'today-fifteen-percent-down'
+  | 'today-twenty-percent-down'
+  | 'earnings-next-three-days'
   | 'pro-trader';
 
 export type StrategyStatus = 'triggered' | 'watch' | 'wait' | 'failed';
@@ -38,6 +46,7 @@ export type SymbolProfile = {
   country: 'US';
   type: 'stock' | 'etf';
   nextEarningsDate?: string;
+  nextEarningsTiming?: string;
   lastEarningsDate?: string;
 };
 
@@ -51,6 +60,8 @@ export type MarketSeries = {
   dataSource?: 'yahoo' | 'stooq' | 'alpha-vantage' | 'insforge';
   lastUpdated?: string;
 };
+
+export type IndexKey = 'sp500' | 'nasdaq100';
 
 export type StrategyResult = {
   strategyId: StrategyId;
@@ -126,4 +137,7 @@ export type AlertRule = {
   level: number;
   enabled: boolean;
   createdAt: string;
+  strategyId?: StrategyId;
+  channel?: 'app' | 'whatsapp-ready';
+  message?: string;
 };

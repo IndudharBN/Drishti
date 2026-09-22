@@ -26,7 +26,15 @@ export const strategyNames: Record<StrategyId, string> = {
   'moving-average-reclaim': 'Moving Average Reclaim',
   'bottom-reversal': 'Bottom Reversal',
   'support-hold-pullback': 'Support Hold Pullback',
+  'sideways-base-ready': 'Sideways Base Ready',
+  'two-percent-vwap-momentum': '2% VWAP Momentum',
   'two-day-five-percent': '2-Day 5% Forecast',
+  'results-gap-down-recovery': 'Results Gap Down Recovery',
+  'today-five-percent-down': 'Today Down 5%+',
+  'today-ten-percent-down': 'Today Down 10%+',
+  'today-fifteen-percent-down': 'Today Down 15%+',
+  'today-twenty-percent-down': 'Today Down 20%+',
+  'earnings-next-three-days': 'Earnings Next 3 Days - Avoid',
   'pro-trader': 'Pro Trader Master Strategy'
 };
 
@@ -38,8 +46,15 @@ const volumeRatioScore = (ratio: number) => (ratio - 1) * 18;
 
 const daysUntil = (iso?: string) => {
   if (!iso) return Number.POSITIVE_INFINITY;
-  const today = new Date('2026-05-05T00:00:00Z').getTime();
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
   return (new Date(`${iso}T00:00:00Z`).getTime() - today) / 86400000;
+};
+
+const earningsTimingLabel = (timing?: string) => {
+  if (timing === 'time-pre-market') return 'Before market open';
+  if (timing === 'time-after-hours') return 'After market close';
+  return 'Time not supplied';
 };
 
 const baseContext = (series: MarketSeries, settings: AppSettings) => {
@@ -68,7 +83,8 @@ const baseContext = (series: MarketSeries, settings: AppSettings) => {
   if (entry < settings.minPrice) blockers.push('Price below configured minimum.');
   if (series.profile.avgVolume < settings.minAverageVolume) blockers.push('Average volume below configured minimum.');
   if (dollarVolume < settings.minDollarVolume) blockers.push('Dollar volume below configured minimum.');
-  if (daysUntil(series.profile.nextEarningsDate) <= 3) blockers.push('Earnings are too close for non-earnings setups.');
+  const daysToEarnings = daysUntil(series.profile.nextEarningsDate);
+  if (daysToEarnings >= 0 && daysToEarnings <= 3) blockers.push('Earnings are too close for non-earnings setups.');
   if (riskPercent > settings.maxRiskPercent + 0.1) blockers.push('Stop distance is wider than the max risk setting.');
   if (rewardRisk < settings.minRewardRisk) blockers.push('Reward/risk is below the minimum setting.');
   return {
@@ -119,6 +135,11 @@ const makeResult = (
     eventDate?: string;
     eventDaysAgo?: number;
     eventPercent?: number;
+    entry?: number;
+    target?: number;
+    stop?: number;
+    riskPercent?: number;
+    rewardRisk?: number;
   }
 ): StrategyResult => {
   const blockers = [
@@ -135,11 +156,11 @@ const makeResult = (
     strategyId,
     strategyName: strategyNames[strategyId],
     score,
-    entry: round2(ctx.entry),
-    target: round2(ctx.target),
-    stop: round2(ctx.stop),
-    riskPercent: round2(ctx.riskPercent),
-    rewardRisk: round2(ctx.rewardRisk),
+    entry: round2(options?.entry ?? ctx.entry),
+    target: round2(options?.target ?? ctx.target),
+    stop: round2(options?.stop ?? ctx.stop),
+    riskPercent: round2(options?.riskPercent ?? ctx.riskPercent),
+    rewardRisk: round2(options?.rewardRisk ?? ctx.rewardRisk),
     status,
     reasons,
     blockers,
@@ -237,6 +258,51 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
   const supportHoldVolumeOk = ctx.volumeRatio <= 1.25 || redVolumeFading;
   const supportHoldBounce = ctx.candle.close > ctx.previous.high || hammerLike || bullishEngulf || (rsiTurningUp && ctx.currentRsi >= 38 && ctx.currentRsi <= 58);
   const supportHoldRiskOk = ctx.rewardRisk >= settings.minRewardRisk && ctx.riskPercent <= settings.maxRiskPercent;
+  const baseCandles = series.candles.slice(-20);
+  const baseCloses = baseCandles.map((candle) => candle.close);
+  const baseHigh = Math.max(...baseCandles.map((candle) => candle.high));
+  const baseLow = Math.min(...baseCandles.map((candle) => candle.low));
+  const baseRangePercent = ((baseHigh - baseLow) / Math.max(average(baseCloses), 0.01)) * 100;
+  const priorBaseCloses = ctx.closes.slice(-50, -20);
+  const priorBaseHigh = Math.max(...priorBaseCloses);
+  const declineBeforeBase = priorBaseHigh > 0 ? ((average(baseCloses.slice(0, 5)) - priorBaseHigh) / priorBaseHigh) * 100 : 0;
+  const closesNearSupport = baseCandles.filter((candle) => candle.close >= baseLow * 0.995).length;
+  const baseSupportHeld = closesNearSupport >= 18;
+  const baseIsTight = baseRangePercent <= 8;
+  const baseAfterDecline = declineBeforeBase <= -5;
+  const baseNearBreakout = ctx.entry >= baseHigh * 0.97;
+  const baseBreakoutConfirmed = ctx.entry > baseHigh * 1.002 && ctx.volumeRatio >= 1.2;
+  const baseMomentumImproving = ctx.macdImproving && rsiTurningUp && ctx.currentRsi >= 42 && ctx.currentRsi <= 62;
+  const baseVolumeDryUp = average(ctx.volumes.slice(-10)) <= average(ctx.volumes.slice(-30, -10)) * 0.95;
+  const baseVolumeReady = baseVolumeDryUp || ctx.volumeRatio >= 1.05;
+  const baseTrendDamageOk = ctx.above200 || ctx.entry >= sma200Value * 0.95;
+  const baseRiskOk = ctx.rewardRisk >= settings.minRewardRisk && ctx.riskPercent <= settings.maxRiskPercent + 0.1;
+  const recentResultsGapEvents = series.candles
+    .map((candle, index) => {
+      const prior = series.candles[index - 1];
+      if (!prior) return null;
+      const priorVolumes = series.candles.slice(Math.max(0, index - 20), index).map((item) => item.volume);
+      const priorAverageVolume = average(priorVolumes);
+      return {
+        candle,
+        daysAgo: series.candles.length - 1 - index,
+        gapPercent: ((candle.open - prior.close) / prior.close) * 100,
+        priorClose: prior.close,
+        volumeRatio: candle.volume / Math.max(priorAverageVolume, 1)
+      };
+    })
+    .filter((event): event is { candle: Candle; daysAgo: number; gapPercent: number; priorClose: number; volumeRatio: number } => Boolean(event))
+    .filter((event) => event.daysAgo <= 15 && event.gapPercent <= -10)
+    .sort((a, b) => a.daysAgo - b.daysAgo || a.gapPercent - b.gapPercent);
+  const resultsGapEvent = recentResultsGapEvents[0];
+  const resultsGapFound = Boolean(resultsGapEvent);
+  const resultsGapRecoveredOpen = resultsGapEvent ? ctx.entry >= resultsGapEvent.candle.open : false;
+  const resultsGapHeldLow = resultsGapEvent ? series.candles.slice(series.candles.length - 1 - resultsGapEvent.daysAgo).every((candle) => candle.close >= resultsGapEvent.candle.low * 0.98) : false;
+  const resultsGapReclaimProgress = resultsGapEvent ? ((ctx.entry - resultsGapEvent.candle.open) / Math.max(resultsGapEvent.priorClose - resultsGapEvent.candle.open, 0.01)) * 100 : 0;
+  const resultsGapQualityOk = series.profile.marketCap >= settings.minMarketCap && series.profile.avgVolume >= settings.minAverageVolume && ctx.dollarVolume >= settings.minDollarVolume;
+  const resultsGapTrendOk = ctx.above200 || ctx.entry >= sma200Value * 0.92;
+  const resultsGapMomentumOk = ctx.macdImproving || ctx.return5 > 0 || rsiTurningUp;
+  const resultsGapRiskOk = ctx.rewardRisk >= settings.minRewardRisk && ctx.riskPercent <= settings.maxRiskPercent + 0.1;
   const twoDayWindows = series.candles.slice(0, -2).map((candle, index) => ((series.candles[index + 2].close - candle.close) / candle.close) * 100);
   const recentTwoDayWindows = twoDayWindows.slice(-40);
   const twoDayBurstRate = twoDayWindows.filter((value) => value >= settings.targetPercent).length / Math.max(twoDayWindows.length, 1);
@@ -255,6 +321,40 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
     0,
     100
   );
+  const todayReturn = ((ctx.candle.close - ctx.previous.close) / ctx.previous.close) * 100;
+  const todayGapPercent = ((ctx.candle.open - ctx.previous.close) / ctx.previous.close) * 100;
+  const intradayRecovery = ((ctx.candle.close - ctx.candle.low) / Math.max(ctx.candle.high - ctx.candle.low, 0.01)) * 100;
+  const todayDownQualityOk = series.profile.marketCap >= settings.minMarketCap && series.profile.avgVolume >= settings.minAverageVolume && ctx.dollarVolume >= settings.minDollarVolume;
+  const todayDownVolumeShock = ctx.volumeRatio >= 1.5;
+  const todayDownGapShock = todayGapPercent <= -8;
+  const todayDownRelativePressure = series.spyRelative20 <= -3 || series.sectorRelative20 <= -3;
+  const todayDownTrendStillInvestable = ctx.above200 || ctx.entry >= sma200Value * 0.9;
+  const todayDownRecoveryAttempt = intradayRecovery >= 35 || ctx.candle.close > ctx.candle.open;
+  const earningsDaysAway = daysUntil(series.profile.nextEarningsDate);
+  const earningsRiskFound = earningsDaysAway >= 0 && earningsDaysAway <= 3;
+  const earningsDateLabel = series.profile.nextEarningsDate || 'No earnings date supplied';
+  const earningsTiming = earningsTimingLabel(series.profile.nextEarningsTiming);
+  const vwapCandles = series.candles.slice(-20);
+  const vwapDollarVolume = vwapCandles.reduce((sum, candle) => sum + ((candle.high + candle.low + candle.close) / 3) * candle.volume, 0);
+  const vwapVolume = vwapCandles.reduce((sum, candle) => sum + candle.volume, 0);
+  const vwapProxy = vwapDollarVolume / Math.max(vwapVolume, 1);
+  const vwapDistance = ((ctx.entry - vwapProxy) / Math.max(vwapProxy, 0.01)) * 100;
+  const vwapEntry = Math.max(ctx.entry, ctx.candle.high * 1.001);
+  const vwapTarget = vwapEntry * 1.02;
+  const vwapStopBase = Math.max(vwapProxy * 0.997, ctx.candle.low * 0.995);
+  const vwapStop = Math.min(vwapEntry * 0.9925, vwapStopBase);
+  const vwapRiskPercent = ((vwapEntry - vwapStop) / vwapEntry) * 100;
+  const vwapRewardRisk = 2 / Math.max(vwapRiskPercent, 0.1);
+  const vwapLiquidityOk = series.profile.marketCap >= settings.minMarketCap && series.profile.avgVolume >= settings.minAverageVolume && ctx.dollarVolume >= settings.minDollarVolume;
+  const vwapMarketOk = series.spyReturn20 >= -2 || series.sectorReturn20 >= series.spyReturn20;
+  const vwapStockGreen = todayReturn > 0;
+  const vwapAbove = ctx.entry > vwapProxy;
+  const vwapNearPullbackZone = vwapDistance >= -0.2 && vwapDistance <= 4;
+  const vwapBreakoutReady = ctx.entry >= ctx.candle.high * 0.985 || ctx.entry > ctx.previous.high;
+  const vwapVolumeOk = ctx.volumeRatio >= 1.2;
+  const vwapNotTooExtended = todayReturn <= 4.5 && ctx.currentRsi <= 74;
+  const vwapTrendOk = ctx.above20 || ctx.entry >= sma20Value * 0.995;
+  const vwapRiskOk = vwapRewardRisk >= 2 && vwapRiskPercent <= 1;
 
   const breakoutChecks = [
     check('Trend position', 'Price above 20-day and 50-day MA', `${ctx.entry.toFixed(2)} vs MA20 ${(last(ctx.sma20) ?? 0).toFixed(2)}, MA50 ${(last(ctx.sma50) ?? 0).toFixed(2)}`, ctx.above20 && ctx.above50, 28),
@@ -585,6 +685,83 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
     { checks: supportHoldChecks }
   ));
 
+  const sidewaysBaseChecks = [
+    check('Tradability', `Market cap >= $${(settings.minMarketCap / 1_000_000_000).toFixed(0)}B and avg volume >= ${(settings.minAverageVolume / 1_000_000).toFixed(0)}M`, `Cap $${(series.profile.marketCap / 1_000_000_000).toFixed(1)}B, avg volume ${(series.profile.avgVolume / 1_000_000).toFixed(1)}M`, ctx.blockers.filter((blocker) => blocker.includes('Market cap') || blocker.includes('volume') || blocker.includes('Dollar')).length === 0, 10),
+    check('Prior decline', 'Stock declined at least 5% before the sideways base', `${declineBeforeBase.toFixed(2)}% from prior 30-session high`, baseAfterDecline, 16),
+    check('Sideways base', '20-session base range <= 8%', `${baseRangePercent.toFixed(2)}% range, low ${baseLow.toFixed(2)}, high ${baseHigh.toFixed(2)}`, baseIsTight, 18),
+    check('Support hold', 'At least 18/20 closes held above base support', `${closesNearSupport}/20 closes above ${baseLow.toFixed(2)}`, baseSupportHeld, 12),
+    check('Near breakout edge', 'Current close within 3% of base high', `${ctx.entry.toFixed(2)} vs base high ${baseHigh.toFixed(2)}`, baseNearBreakout, 12),
+    check('Momentum turn', 'MACD improving, RSI rising, RSI 42-62', `RSI ${previousRsi.toFixed(1)} -> ${ctx.currentRsi.toFixed(1)}, MACD improving ${ctx.macdImproving ? 'yes' : 'no'}`, baseMomentumImproving, 12),
+    check('Volume setup', 'Base volume dried up or current volume >= 1.05x average', `Current ${ctx.volumeRatio.toFixed(2)}x, base dry-up ${baseVolumeDryUp ? 'yes' : 'no'}`, baseVolumeReady, 8),
+    check('Trend damage', 'Above 200-day MA or within 5% below it', `${ctx.entry.toFixed(2)} vs MA200 ${sma200Value.toFixed(2)}`, baseTrendDamageOk, 6),
+    check('5% reward/risk', `R/R >= ${settings.minRewardRisk.toFixed(1)}x and risk <= ${settings.maxRiskPercent.toFixed(1)}%`, `R/R ${ctx.rewardRisk.toFixed(2)}x, risk ${ctx.riskPercent.toFixed(2)}%`, baseRiskOk, 6),
+    check('Breakout confirmation', 'Close above base high with volume >= 1.2x average', `${ctx.entry.toFixed(2)} vs ${baseHigh.toFixed(2)}, volume ${ctx.volumeRatio.toFixed(2)}x`, baseBreakoutConfirmed, 10)
+  ];
+
+  results.push(makeResult(
+    'sideways-base-ready',
+    sidewaysBaseChecks.reduce((sum, item) => sum + (item.passed ? item.points : 0), 0),
+    ctx,
+    [
+      'Finds liquid stocks that declined, formed a controlled 20-session sideways base, held support, and are approaching the top of that base with improving momentum.',
+      baseBreakoutConfirmed
+        ? 'Breakout confirmation is present. The matrix still defines a stop and reward/risk because breakouts can fail.'
+        : 'This is a watchlist setup near the breakout edge. Wait for a close above the base high with volume before treating it as an entry.'
+    ],
+    [
+      ...(!baseAfterDecline ? ['Required gate failed: stock did not decline enough before forming the base.'] : []),
+      ...(!baseIsTight ? ['Required gate failed: 20-session range is too wide to qualify as a controlled sideways base.'] : []),
+      ...(!baseSupportHeld ? ['Required gate failed: base support has not held consistently.'] : []),
+      ...(!baseNearBreakout ? ['Required gate failed: price is not close enough to the top of the sideways base.'] : []),
+      ...(!baseMomentumImproving ? ['Required gate failed: momentum has not started improving yet.'] : []),
+      ...(!baseVolumeReady ? ['Required gate failed: volume does not show base dry-up or renewed demand.'] : []),
+      ...(!baseTrendDamageOk ? ['Required gate failed: stock is too weak versus the 200-day moving average.'] : []),
+      ...(!baseRiskOk ? ['Required gate failed: 5% target does not meet the configured risk model.'] : [])
+    ],
+    { checks: sidewaysBaseChecks }
+  ));
+
+  const vwapMomentumChecks = [
+    check('Tradability', `Market cap >= $${(settings.minMarketCap / 1_000_000_000).toFixed(0)}B, avg volume >= ${(settings.minAverageVolume / 1_000_000).toFixed(0)}M`, `Cap $${(series.profile.marketCap / 1_000_000_000).toFixed(1)}B, avg volume ${(series.profile.avgVolume / 1_000_000).toFixed(1)}M`, vwapLiquidityOk, 10),
+    check('Market/sector support', 'Broad market not weak or sector beating SPY', `SPY 20d ${series.spyReturn20.toFixed(2)}%, sector 20d ${series.sectorReturn20.toFixed(2)}%`, vwapMarketOk, 12),
+    check('Stock green today', 'Latest candle is positive versus prior close', `${todayReturn.toFixed(2)}% today`, vwapStockGreen, 12),
+    check('Above VWAP proxy', 'Price above 20-session volume weighted price', `${ctx.entry.toFixed(2)} vs VWAP ${vwapProxy.toFixed(2)} (${vwapDistance.toFixed(2)}%)`, vwapAbove && vwapNearPullbackZone, 16),
+    check('Entry trigger zone', 'Close near day high or above previous high', `${ctx.entry.toFixed(2)} vs day high ${ctx.candle.high.toFixed(2)}, prev high ${ctx.previous.high.toFixed(2)}`, vwapBreakoutReady, 14),
+    check('Relative volume', 'Volume >= 1.2x 20-day average', `${ctx.volumeRatio.toFixed(2)}x`, vwapVolumeOk, 14),
+    check('Not overextended', 'Today <= 4.5% and RSI <= 74', `Today ${todayReturn.toFixed(2)}%, RSI ${ctx.currentRsi.toFixed(1)}`, vwapNotTooExtended, 8),
+    check('Trend support', 'Above or reclaiming 20-day MA', `${ctx.entry.toFixed(2)} vs MA20 ${sma20Value.toFixed(2)}`, vwapTrendOk, 6),
+    check('2% risk/reward', 'R/R >= 2x with risk <= 1%', `Entry ${vwapEntry.toFixed(2)}, stop ${vwapStop.toFixed(2)}, R/R ${vwapRewardRisk.toFixed(2)}x, risk ${vwapRiskPercent.toFixed(2)}%`, vwapRiskOk, 8)
+  ];
+
+  results.push(makeResult(
+    'two-percent-vwap-momentum',
+    vwapMomentumChecks.reduce((sum, item) => sum + (item.passed ? item.points : 0), 0),
+    ctx,
+    [
+      'Scans for liquid stocks with market support, positive current-session momentum, price above a volume-weighted fair price, higher relative volume, and a tight 2% trade model.',
+      'Use this as an entry-alert scanner. In live trading, confirm on a 5-minute chart that price is above true intraday VWAP before entering.'
+    ],
+    [
+      ...(!vwapLiquidityOk ? ['Required gate failed: stock does not meet the liquid large-stock filter.'] : []),
+      ...(!vwapMarketOk ? ['Required gate failed: market or sector support is not strong enough.'] : []),
+      ...(!vwapStockGreen ? ['Required gate failed: stock is not positive today.'] : []),
+      ...(!vwapAbove || !vwapNearPullbackZone ? ['Required gate failed: price is not in a controlled VWAP buy zone.'] : []),
+      ...(!vwapBreakoutReady ? ['Required gate failed: price is not near a fresh intraday/daily trigger zone.'] : []),
+      ...(!vwapVolumeOk ? ['Required gate failed: volume is below the momentum threshold.'] : []),
+      ...(!vwapNotTooExtended ? ['Required gate failed: stock is already too extended for a controlled entry.'] : []),
+      ...(!vwapTrendOk ? ['Required gate failed: price does not have 20-day trend support.'] : []),
+      ...(!vwapRiskOk ? ['Required gate failed: the 2% target does not provide at least 2x reward/risk with a tight stop.'] : [])
+    ],
+    {
+      checks: vwapMomentumChecks,
+      entry: vwapEntry,
+      target: vwapTarget,
+      stop: vwapStop,
+      riskPercent: vwapRiskPercent,
+      rewardRisk: vwapRewardRisk
+    }
+  ));
+
   const twoDayForecastChecks = [
     check('Historical 2-day burst rate', `Past 2-session windows reaching +${settings.targetPercent.toFixed(0)}%`, `${(twoDayBurstRate * 100).toFixed(1)}% all-time, ${(recentTwoDayBurstRate * 100).toFixed(1)}% recent`, twoDayBurstRate >= 0.04 || recentTwoDayBurstRate >= 0.08, 16),
     check('Current momentum', 'Positive 2d and 5d momentum with acceleration', `2d ${currentTwoDayReturn.toFixed(2)}%, 5d ${ctx.return5.toFixed(2)}%`, currentTwoDayReturn > 0 && ctx.return5 > 2 && priceAcceleration, 18),
@@ -611,7 +788,122 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
     { checks: twoDayForecastChecks }
   ));
 
-  const topTenAverage = average(results.map((result) => result.score));
+  const resultsGapLabel = resultsGapEvent
+    ? `${resultsGapEvent.gapPercent.toFixed(2)}% gap ${resultsGapEvent.daysAgo === 0 ? 'today' : `${resultsGapEvent.daysAgo} sessions ago`} (${resultsGapEvent.candle.date})`
+    : 'No qualifying gap in last 15 sessions';
+  const resultsGapChecks = [
+    check('Quality filter', `Market cap >= $${(settings.minMarketCap / 1_000_000_000).toFixed(0)}B and liquid volume`, `Cap $${(series.profile.marketCap / 1_000_000_000).toFixed(1)}B, avg volume ${(series.profile.avgVolume / 1_000_000).toFixed(1)}M`, resultsGapQualityOk, 18),
+    check('Results gap event', 'Opening gap down <= -10% in last 15 sessions', resultsGapLabel, resultsGapFound, 22),
+    check('Event volume', 'Gap-day volume >= 1.2x prior 20-day average', resultsGapEvent ? `${resultsGapEvent.volumeRatio.toFixed(2)}x` : 'No gap event', resultsGapEvent ? resultsGapEvent.volumeRatio >= 1.2 : false, 14),
+    check('Damage control', 'Current closes have held within 2% of gap-day low', resultsGapEvent ? `Close ${ctx.entry.toFixed(2)} vs gap low ${resultsGapEvent.candle.low.toFixed(2)}` : 'No gap event', resultsGapHeldLow, 14),
+    check('Recovery signal', 'Current price has reclaimed the gap-day open', resultsGapEvent ? `Close ${ctx.entry.toFixed(2)} vs gap open ${resultsGapEvent.candle.open.toFixed(2)}, ${resultsGapReclaimProgress.toFixed(0)}% gap-fill progress` : 'No gap event', resultsGapRecoveredOpen, 12),
+    check('Business strength proxy', 'Above 200-day MA or within 8% below it', `${ctx.entry.toFixed(2)} vs MA200 ${sma200Value.toFixed(2)}`, resultsGapTrendOk, 10),
+    check('Short-term turn', 'MACD improving, positive 5d return, or RSI turning up', `5d ${ctx.return5.toFixed(2)}%, RSI ${previousRsi.toFixed(1)} -> ${ctx.currentRsi.toFixed(1)}`, resultsGapMomentumOk, 10),
+    check('Reward/risk', `R/R >= ${settings.minRewardRisk.toFixed(1)}x and risk <= ${settings.maxRiskPercent.toFixed(1)}%`, `R/R ${ctx.rewardRisk.toFixed(2)}x, risk ${ctx.riskPercent.toFixed(2)}%`, resultsGapRiskOk, 10)
+  ];
+
+  results.push(makeResult(
+    'results-gap-down-recovery',
+    resultsGapChecks.reduce((sum, item) => sum + (item.passed ? item.points : 0), 0),
+    ctx,
+    [
+      'Finds strong, liquid stocks that opened sharply lower in the last 15 sessions on abnormal volume, which often happens around results or guidance reactions.',
+      'Looks for damage control and early recovery signs rather than buying a stock that is still breaking down.'
+    ],
+    [
+      ...(!resultsGapFound ? ['Required gate failed: no 10%+ results-style gap down was found in the last 15 sessions.'] : []),
+      ...(!resultsGapQualityOk ? ['Required gate failed: stock does not meet the strong/liquid quality filter.'] : []),
+      ...(resultsGapEvent && resultsGapEvent.volumeRatio < 1.2 ? ['Required gate failed: gap-day volume was not abnormal enough for a results-style event.'] : []),
+      ...(!resultsGapHeldLow ? ['Required gate failed: stock has not controlled downside damage after the gap.'] : []),
+      ...(!resultsGapRecoveredOpen ? ['Required gate failed: stock has not reclaimed the gap-day open yet.'] : []),
+      ...(!resultsGapTrendOk ? ['Required gate failed: price is too far below the 200-day moving average for this recovery setup.'] : []),
+      ...(!resultsGapMomentumOk ? ['Required gate failed: no short-term recovery signal has appeared yet.'] : []),
+      ...(!resultsGapRiskOk ? ['Required gate failed: reward/risk does not meet the configured swing setup limits.'] : [])
+    ],
+    {
+      checks: resultsGapChecks,
+      eventDate: resultsGapEvent?.candle.date,
+      eventDaysAgo: resultsGapEvent?.daysAgo,
+      eventPercent: resultsGapEvent?.gapPercent
+    }
+  ));
+
+  const todayDownStrategies: Array<{ strategyId: StrategyId; threshold: number }> = [
+    { strategyId: 'today-five-percent-down', threshold: 5 },
+    { strategyId: 'today-ten-percent-down', threshold: 10 },
+    { strategyId: 'today-fifteen-percent-down', threshold: 15 },
+    { strategyId: 'today-twenty-percent-down', threshold: 20 }
+  ];
+  todayDownStrategies.forEach(({ strategyId, threshold }) => {
+    const found = todayReturn <= -threshold;
+    const checks = [
+      check('Quality filter', `Market cap >= $${(settings.minMarketCap / 1_000_000_000).toFixed(0)}B and liquid volume`, `Cap $${(series.profile.marketCap / 1_000_000_000).toFixed(1)}B, avg volume ${(series.profile.avgVolume / 1_000_000).toFixed(1)}M`, todayDownQualityOk, 18),
+      check('Today selloff', `Latest daily return <= -${threshold}%`, `${todayReturn.toFixed(2)}% vs previous close ${ctx.previous.close.toFixed(2)}`, found, 26),
+      check('Opening shock', 'Open <= -8% below prior close', `${todayGapPercent.toFixed(2)}% opening gap`, todayDownGapShock, 12),
+      check('Volume shock', 'Current volume >= 1.5x 20-day average', `${ctx.volumeRatio.toFixed(2)}x`, todayDownVolumeShock, 16),
+      check('Stock-specific pressure', 'Underperforming SPY or sector by at least 3%', `SPY rel ${series.spyRelative20.toFixed(2)}%, sector rel ${series.sectorRelative20.toFixed(2)}%`, todayDownRelativePressure, 10),
+      check('Business strength proxy', 'Above 200-day MA or within 10% below it', `${ctx.entry.toFixed(2)} vs MA200 ${sma200Value.toFixed(2)}`, todayDownTrendStillInvestable, 10),
+      check('Intraday stabilization', 'Closed in upper 35% of daily range or green from open', `Recovered ${intradayRecovery.toFixed(0)}% of daily range`, todayDownRecoveryAttempt, 8)
+    ];
+    const reason = found
+      ? [
+        `${series.profile.symbol} is down ${todayReturn.toFixed(2)}% today, so the move qualifies as a ${threshold}%+ selloff.`,
+        todayDownGapShock
+          ? `The stock opened ${todayGapPercent.toFixed(2)}% below the prior close, pointing to an overnight/event-driven negative reaction.`
+          : 'The stock did not start with a deep opening gap; most of the pressure happened during regular trading.',
+        todayDownVolumeShock
+          ? `Volume is ${ctx.volumeRatio.toFixed(2)}x its 20-day average, so the drop is being driven by abnormal selling pressure.`
+          : `Volume is ${ctx.volumeRatio.toFixed(2)}x average, so the selloff is less confirmed by abnormal participation.`,
+        todayDownRelativePressure
+          ? 'Relative performance is weak versus SPY/sector, which suggests stock-specific pressure rather than only broad market weakness.'
+          : 'Relative pressure versus SPY/sector is not extreme, so broad market or sector movement may be part of the drop.'
+      ].join(' ')
+      : `Latest daily move is ${todayReturn.toFixed(2)}%, so it has not fallen more than ${threshold}% today.`;
+    results.push(makeResult(
+      strategyId,
+      checks.reduce((sum, item) => sum + (item.passed ? item.points : 0), 0),
+      ctx,
+      [reason, 'This tab is a risk radar for strong, liquid stocks hit hard today; it explains the technical reason for the drop and separates quality from falling-knife risk.'],
+      [
+        ...(!found ? [`Required gate failed: stock is not down more than ${threshold}% today.`] : []),
+        ...(!todayDownQualityOk ? ['Required gate failed: stock does not meet the strong/liquid quality filter.'] : []),
+        ...(!todayDownVolumeShock ? ['Required gate failed: selloff volume is not abnormal enough.'] : [])
+      ],
+      { allowNearEarnings: true, ignoreRiskBlockers: true, checks, eventDate: ctx.candle.date, eventDaysAgo: 0, eventPercent: todayReturn }
+    ));
+  });
+
+  const earningsRiskChecks = [
+    check('Upcoming earnings', 'Results scheduled within the next 3 calendar days', earningsRiskFound ? `${earningsDateLabel} (${earningsDaysAway.toFixed(0)} days)` : earningsDateLabel, earningsRiskFound, 70),
+    check('Report timing', 'Earnings timing available', earningsTiming, Boolean(series.profile.nextEarningsTiming), 15),
+    check('Liquidity', `Average volume >= ${(settings.minAverageVolume / 1_000_000).toFixed(0)}M shares`, `${(series.profile.avgVolume / 1_000_000).toFixed(1)}M`, series.profile.avgVolume >= settings.minAverageVolume, 15)
+  ];
+
+  results.push(makeResult(
+    'earnings-next-three-days',
+    earningsRiskChecks.reduce((sum, item) => sum + (item.passed ? item.points : 0), 0),
+    ctx,
+    [
+      earningsRiskFound
+        ? `${series.profile.symbol} reports earnings on ${earningsDateLabel}. Nasdaq lists the timing as: ${earningsTiming}. Avoid opening a new normal swing trade before the result unless you intentionally accept earnings-gap risk.`
+        : 'No earnings report is listed within the next three calendar days.',
+      'This is an avoid list, not a buy strategy. Earnings can create overnight gaps that bypass normal stop-loss levels.'
+    ],
+    [
+      ...(!earningsRiskFound ? ['Required gate failed: no earnings report is listed within the next three calendar days.'] : [])
+    ],
+    {
+      allowNearEarnings: true,
+      ignoreRiskBlockers: true,
+      checks: earningsRiskChecks,
+      eventDate: earningsRiskFound ? series.profile.nextEarningsDate : undefined,
+      eventDaysAgo: earningsRiskFound ? Math.round(earningsDaysAway) : undefined
+    }
+  ));
+
+  const excludedRadarStrategies: StrategyId[] = ['two-percent-vwap-momentum', 'results-gap-down-recovery', 'today-five-percent-down', 'today-ten-percent-down', 'today-fifteen-percent-down', 'today-twenty-percent-down', 'earnings-next-three-days'];
+  const proInputResults = results.filter((result) => !excludedRadarStrategies.includes(result.strategyId));
+  const topTenAverage = average(proInputResults.map((result) => result.score));
   const proScore =
     scoreBool(ctx.above20 && ctx.above50, 12) +
     scoreBool(series.sectorReturn20 > series.spyReturn20, 18) +
@@ -619,7 +911,7 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
     scoreBool(ctx.rewardRisk >= 2, 18) +
     scoreBool(ctx.riskPercent <= settings.maxRiskPercent, 12) +
     scoreBool(topTenAverage > 62, 10) +
-    scoreBool(results.filter((result) => result.score >= 75).length >= 2, 10);
+    scoreBool(proInputResults.filter((result) => result.score >= 75).length >= 2, 10);
   const proChecks = [
     check('Trend base', 'Above 20-day and 50-day MA', `${ctx.entry.toFixed(2)} vs MA20 ${(last(ctx.sma20) ?? 0).toFixed(2)}, MA50 ${(last(ctx.sma50) ?? 0).toFixed(2)}`, ctx.above20 && ctx.above50, 12),
     check('Sector support', 'Sector beats SPY', `${series.sectorReturn20.toFixed(2)}% vs SPY ${series.spyReturn20.toFixed(2)}%`, series.sectorReturn20 > series.spyReturn20, 18),
@@ -627,7 +919,7 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
     check('Reward/risk', 'R/R >= 1.6x', `${ctx.rewardRisk.toFixed(2)}x`, ctx.rewardRisk >= 1.6, 18),
     check('Risk control', `Risk <= ${settings.maxRiskPercent.toFixed(1)}%`, `${ctx.riskPercent.toFixed(2)}%`, ctx.riskPercent <= settings.maxRiskPercent, 12),
     check('Strategy quality', 'Average strategy score > 62', `${topTenAverage.toFixed(1)}`, topTenAverage > 62, 10),
-    check('Confluence', 'At least 2 qualified strategy confirmations', `${results.filter((result) => result.blockers.length === 0 && result.score >= 75).length}`, results.filter((result) => result.blockers.length === 0 && result.score >= 75).length >= 2, 10)
+    check('Confluence', 'At least 2 qualified strategy confirmations', `${proInputResults.filter((result) => result.blockers.length === 0 && result.score >= 75).length}`, proInputResults.filter((result) => result.blockers.length === 0 && result.score >= 75).length >= 2, 10)
   ];
   results.push(makeResult(
     'pro-trader',
@@ -639,7 +931,7 @@ export const evaluateStrategies = (series: MarketSeries, settings: AppSettings =
       ...(series.sectorReturn20 <= series.spyReturn20 ? ['Required gate failed: sector is not outperforming SPY.'] : []),
       ...(series.spyRelative20 <= 1.5 || series.sectorRelative20 <= 0.5 ? ['Required gate failed: stock is not a strong relative-strength leader.'] : []),
       ...(ctx.rewardRisk < 1.6 ? ['Required gate failed: reward/risk is below 1.6x for Pro Trader model.'] : []),
-      ...(results.filter((result) => result.blockers.length === 0 && result.score >= 75).length < 2 ? ['Required gate failed: fewer than two qualified strategy confirmations.'] : [])
+      ...(proInputResults.filter((result) => result.blockers.length === 0 && result.score >= 75).length < 2 ? ['Required gate failed: fewer than two qualified strategy confirmations.'] : [])
     ],
     { checks: proChecks }
   ));
@@ -651,8 +943,9 @@ export const rankStocks = (market: MarketSeries[], settings: AppSettings = defau
   market.map((series) => {
     const results = evaluateStrategies(series, settings);
     const proResult = results.find((result) => result.strategyId === 'pro-trader') ?? results[0];
-    const qualified = results.find((result) => result.strategyId !== 'two-day-five-percent' && result.blockers.length === 0 && result.score >= 70);
-    const confluence = results.filter((result) => result.strategyId !== 'pro-trader' && result.strategyId !== 'two-day-five-percent' && result.blockers.length === 0 && result.score >= 75).length;
+    const radarStrategyIds: StrategyId[] = ['two-percent-vwap-momentum', 'two-day-five-percent', 'results-gap-down-recovery', 'today-five-percent-down', 'today-ten-percent-down', 'today-fifteen-percent-down', 'today-twenty-percent-down', 'earnings-next-three-days'];
+    const qualified = results.find((result) => !radarStrategyIds.includes(result.strategyId) && result.blockers.length === 0 && result.score >= 70);
+    const confluence = results.filter((result) => result.strategyId !== 'pro-trader' && !radarStrategyIds.includes(result.strategyId) && result.blockers.length === 0 && result.score >= 75).length;
     return {
       series,
       results,

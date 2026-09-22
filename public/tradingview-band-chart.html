@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TradingView Band Bounce Chart</title>
+    <style>
+      html, body, #chart { height: 100%; margin: 0; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="chart"></div>
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+    <script>
+      const symbol = new URLSearchParams(window.location.search).get('symbol') || 'NASDAQ:MSFT';
+      new TradingView.widget({
+        autosize: true,
+        symbol,
+        interval: 'D',
+        timezone: 'exchange',
+        theme: 'light',
+        style: '1',
+        locale: 'en',
+        toolbar_bg: '#f8fafc',
+        enable_publishing: false,
+        allow_symbol_change: true,
+        save_image: true,
+        hide_side_toolbar: false,
+        withdateranges: true,
+        studies: [
+          'BB@tv-basicstudies',
+          'BollingerBandsR@tv-basicstudies',
+          'BollingerBandsWidth@tv-basicstudies',
+          'MAExp@tv-basicstudies',
+          'MAWeighted@tv-basicstudies'
+        ],
+        show_popup_button: true,
+        popup_width: '1200',
+        popup_height: '760',
+        container_id: 'chart'
+      });
+    </script>
+  </body>
+</html>

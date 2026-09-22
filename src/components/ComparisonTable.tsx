@@ -8,7 +8,14 @@ type Props = {
 
 const columns: StrategyId[] = [
   'pro-trader',
+  'two-percent-vwap-momentum',
   'two-day-five-percent',
+  'results-gap-down-recovery',
+  'today-five-percent-down',
+  'today-ten-percent-down',
+  'today-fifteen-percent-down',
+  'today-twenty-percent-down',
+  'earnings-next-three-days',
   'breakout-momentum',
   'pullback-uptrend',
   'relative-strength-leader',
@@ -20,7 +27,8 @@ const columns: StrategyId[] = [
   'gap-fill-reversal',
   'moving-average-reclaim',
   'bottom-reversal',
-  'support-hold-pullback'
+  'support-hold-pullback',
+  'sideways-base-ready'
 ];
 
 export const ComparisonTable = ({ stocks, onSelect }: Props) => (

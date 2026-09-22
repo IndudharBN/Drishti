@@ -13,6 +13,11 @@ type NasdaqRow = {
   country: string;
 };
 
+type NasdaqEarningsRow = {
+  symbol: string;
+  time?: string;
+};
+
 type YahooChartResult = {
   meta: {
     symbol: string;
@@ -65,7 +70,7 @@ const buildUniverse = (rows: NasdaqRow[]) => {
   const candidates = rows
     .map((row) => {
       const price = parseMoney(row.lastsale);
-      const volume = Number(row.volume || 0);
+      const volume = parseMoney(row.volume);
       const marketCap = parseMoney(row.marketCap);
       return {
         row,
@@ -95,6 +100,41 @@ const buildUniverse = (rows: NasdaqRow[]) => {
   };
 };
 
+const buildPennyUniverse = (rows: NasdaqRow[]) => {
+  const candidates = rows
+    .map((row) => {
+      const price = parseMoney(row.lastsale);
+      const volume = parseMoney(row.volume);
+      const marketCap = parseMoney(row.marketCap);
+      return {
+        row,
+        price,
+        volume,
+        marketCap,
+        dollarVolume: price * volume
+      };
+    })
+    .filter((item) =>
+      item.row.symbol &&
+      /^[A-Z.-]{1,6}$/.test(item.row.symbol) &&
+      item.row.country === 'United States' &&
+      item.price >= 1 &&
+      item.price <= 5 &&
+      item.marketCap >= 100_000_000 &&
+      item.volume >= 750_000 &&
+      item.dollarVolume >= 2_000_000 &&
+      item.row.sector &&
+      !shouldExcludeName(item.row.name || '')
+    )
+    .sort((a, b) => b.dollarVolume - a.dollarVolume)
+    .slice(0, 140);
+
+  return {
+    symbols: candidates.map((item) => item.row.symbol),
+    metadata: new Map(candidates.map((item) => [item.row.symbol, item.row]))
+  };
+};
+
 const fetchNasdaqUniverse = async (cacheBust: string): Promise<{ symbols: string[]; metadata: Map<string, NasdaqRow> }> => {
   const params = new URLSearchParams({ source: 'nasdaq' });
   params.set('t', cacheBust);
@@ -107,11 +147,45 @@ const fetchNasdaqUniverse = async (cacheBust: string): Promise<{ symbols: string
   }
   const rows = (payload?.data?.rows || []) as NasdaqRow[];
   const universe = buildUniverse(rows);
-  if (universe.symbols.length > 0) return universe;
+  const pennyUniverse = buildPennyUniverse(rows);
+  if (universe.symbols.length > 0) {
+    return {
+      symbols: Array.from(new Set([...universe.symbols, ...pennyUniverse.symbols])),
+      metadata: new Map([...universe.metadata, ...pennyUniverse.metadata])
+    };
+  }
   return {
     symbols: fallbackUniverseSymbols,
     metadata: new Map(rows.filter((row) => fallbackUniverseSymbols.includes(row.symbol)).map((row) => [row.symbol, row]))
   };
+};
+
+const isoDate = (date: Date) => date.toISOString().slice(0, 10);
+
+const fetchNasdaqEarnings = async (cacheBust: string): Promise<Map<string, { date: string; timing?: string }>> => {
+  const earnings = new Map<string, { date: string; timing?: string }>();
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  const dates = Array.from({ length: 4 }, (_, offset) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() + offset);
+    return isoDate(date);
+  });
+  await mapWithConcurrency(dates, 4, async (date) => {
+    const params = new URLSearchParams({ source: 'nasdaq-earnings', date, t: cacheBust });
+    const proxyUrl = `/nasdaq/api/calendar/earnings?date=${date}&t=${cacheBust}`;
+    let payload: any;
+    try {
+      payload = await requestJson(marketDataFunction(params));
+    } catch {
+      payload = await requestJson(proxyUrl, { Accept: 'application/json' });
+    }
+    const rows = (payload?.data?.rows || []) as NasdaqEarningsRow[];
+    rows.forEach((row) => {
+      if (row.symbol && !earnings.has(row.symbol)) earnings.set(row.symbol, { date, timing: row.time });
+    });
+  });
+  return earnings;
 };
 
 const fetchYahooChart = async (symbol: string, cacheBust: string): Promise<YahooChartResult> => {
@@ -128,7 +202,12 @@ const fetchYahooChart = async (symbol: string, cacheBust: string): Promise<Yahoo
   return result as YahooChartResult;
 };
 
-const parseMoney = (value?: string) => Number(String(value || '').replace(/[$,%]/g, '')) || 0;
+const parseMoney = (value?: string) => {
+  const raw = String(value || '').trim().toUpperCase();
+  const multiplier = raw.endsWith('B') ? 1_000_000_000 : raw.endsWith('M') ? 1_000_000 : raw.endsWith('K') ? 1_000 : 1;
+  const normalized = raw.replace(/[$,%\s,]/g, '').replace(/[BMK]$/, '');
+  return (Number(normalized) || 0) * multiplier;
+};
 
 const toTradingViewExchange = (fullExchangeName?: string, exchangeName?: string) => {
   const value = `${fullExchangeName || ''} ${exchangeName || ''}`.toUpperCase();
@@ -161,9 +240,9 @@ const chartToCandles = (chart: YahooChartResult): Candle[] => {
   }).filter((item): item is Candle => Boolean(item));
 };
 
-const profileFromSources = (symbol: string, chart: YahooChartResult, row?: NasdaqRow): SymbolProfile => {
+const profileFromSources = (symbol: string, chart: YahooChartResult, row?: NasdaqRow, earnings?: { date: string; timing?: string }): SymbolProfile => {
   const marketCap = parseMoney(row?.marketCap);
-  const volume = Number(row?.volume || chart.meta.regularMarketVolume || 0);
+  const volume = parseMoney(row?.volume) || chart.meta.regularMarketVolume || 0;
   return {
     symbol,
     company: chart.meta.longName || chart.meta.shortName || row?.name || symbol,
@@ -173,6 +252,8 @@ const profileFromSources = (symbol: string, chart: YahooChartResult, row?: Nasda
     industry: row?.industry || 'Unknown',
     marketCap,
     avgVolume: volume,
+    nextEarningsDate: earnings?.date,
+    nextEarningsTiming: earnings?.timing,
     country: 'US',
     type: chart.meta.instrumentType === 'ETF' ? 'etf' : 'stock'
   };
@@ -181,6 +262,7 @@ const profileFromSources = (symbol: string, chart: YahooChartResult, row?: Nasda
 export const fetchLiveMarket = async (): Promise<MarketSeries[]> => {
   const cacheBust = String(Date.now());
   const { symbols: stockSymbols, metadata } = await fetchNasdaqUniverse(cacheBust);
+  const upcomingEarnings = await fetchNasdaqEarnings(cacheBust);
   const charts = new Map<string, YahooChartResult>();
   const requiredEtfs = new Set<string>(['SPY']);
 
@@ -209,7 +291,7 @@ export const fetchLiveMarket = async (): Promise<MarketSeries[]> => {
     const row = metadata.get(symbol);
     const candles = chartToCandles(chart);
     if (candles.length < 60) return;
-    const profile = profileFromSources(symbol, chart, row);
+    const profile = profileFromSources(symbol, chart, row, upcomingEarnings.get(symbol));
     const sectorEtf = sectorEtfs[profile.sector] || defaultSectorEtf;
     const sectorCandles = chartToCandles(charts.get(sectorEtf) || charts.get('SPY')!);
     const stockReturn20 = rateOfChange(candles.map((candle) => candle.close), 20);

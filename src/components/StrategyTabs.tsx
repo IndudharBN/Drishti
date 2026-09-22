@@ -8,7 +8,14 @@ type Props = {
 
 const strategyOrder: Array<StrategyId | 'all'> = [
   'pro-trader',
+  'two-percent-vwap-momentum',
   'two-day-five-percent',
+  'results-gap-down-recovery',
+  'today-five-percent-down',
+  'today-ten-percent-down',
+  'today-fifteen-percent-down',
+  'today-twenty-percent-down',
+  'earnings-next-three-days',
   'all',
   'breakout-momentum',
   'pullback-uptrend',
@@ -22,11 +29,12 @@ const strategyOrder: Array<StrategyId | 'all'> = [
   'recent-gap-down',
   'moving-average-reclaim',
   'bottom-reversal',
-  'support-hold-pullback'
+  'support-hold-pullback',
+  'sideways-base-ready'
 ];
 
 export const StrategyTabs = ({ value, onChange }: Props) => (
-  <div className="flex gap-2 overflow-x-auto pb-2">
+  <div className="grid max-h-[48vh] grid-cols-2 gap-2 overflow-y-auto pr-1 xl:max-h-[calc(100vh-9.5rem)] xl:grid-cols-1">
     {strategyOrder.map((item) => {
       const active = value === item;
       const label = item === 'all' ? 'All Strategies' : strategyNames[item];
@@ -34,7 +42,7 @@ export const StrategyTabs = ({ value, onChange }: Props) => (
         <button
           key={item}
           onClick={() => onChange(item)}
-          className={`h-9 shrink-0 rounded-md border px-3 text-sm font-semibold transition ${
+          className={`min-h-9 rounded-md border px-3 py-2 text-left text-sm font-semibold leading-tight transition ${
             active
               ? 'border-ink bg-ink text-white'
               : 'border-line bg-white text-slate-700 hover:border-slate-400'
